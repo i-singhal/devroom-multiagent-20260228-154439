@@ -14,6 +14,7 @@ export default function HomePage() {
   const [showCreate, setShowCreate] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newGoal, setNewGoal] = useState("");
+  const [newRepositoryUrl, setNewRepositoryUrl] = useState("");
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
@@ -36,7 +37,12 @@ export default function HomePage() {
     if (!newTitle.trim() || !newGoal.trim()) return;
     setCreating(true);
     try {
-      const res = await roomsApi.create(newTitle.trim(), newGoal.trim());
+      const repoUrl = newRepositoryUrl.trim();
+      const res = await roomsApi.create(
+        newTitle.trim(),
+        newGoal.trim(),
+        repoUrl ? repoUrl : undefined,
+      );
       router.push(`/rooms/${res.data.id}`);
     } catch (err) {
       console.error(err);
@@ -125,6 +131,18 @@ export default function HomePage() {
                   value={newGoal}
                   onChange={(e) => setNewGoal(e.target.value)}
                 />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">GitHub Repo URL (optional)</label>
+                <input
+                  className="input"
+                  placeholder="https://github.com/your-org/your-repo.git"
+                  value={newRepositoryUrl}
+                  onChange={(e) => setNewRepositoryUrl(e.target.value)}
+                />
+                <p className="text-xs text-slate-500 mt-1">
+                  If left blank, DevRoom creates a room workspace repo automatically.
+                </p>
               </div>
               <div className="flex gap-2 pt-1">
                 <button onClick={() => setShowCreate(false)} className="btn-ghost flex-1">Cancel</button>

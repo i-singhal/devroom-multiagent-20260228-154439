@@ -4,6 +4,7 @@ node_modules/
 apps/web/.next*
 dist/
 build/
+room-workspaces/
 .env
 *.env.local
 prisma/migrations/dev.db

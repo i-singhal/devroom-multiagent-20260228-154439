@@ -26,6 +26,12 @@ model Room {
   id        String   @id @default(uuid())
   title     String
   goal      String
+  workspacePath  String?
+  repoRemoteUrl  String?
+  repoDefaultBranch String @default("main")
+  repoReady      Boolean  @default(false)
+  repoLastError  String?
+  repoLastSyncedAt DateTime?
   createdAt DateTime @default(now())
 
   memberships  Membership[]

@@ -5,6 +5,7 @@ import os from "os";
 import path from "path";
 import { prisma } from "../db";
 import { emitEvent } from "../websocket";
+import { ensureRoomRepoWorkspace } from "../services/roomRepo";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const AGENTIC_MODEL = "gpt-4o";
@@ -24,10 +25,6 @@ type PatchPlan = {
   verificationCommands: string[];
   progressSummary: string;
 };
-
-function workspaceRoot() {
-  return process.env.AGENT_WORKSPACE_DIR || process.cwd();
-}
 
 function runShell(cwd: string, cmd: string, timeoutMs = 120000): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
@@ -234,8 +231,9 @@ Return JSON only:
   "targetFiles": ["relative/path"]
 }
 Rules:
-- Pick up to 6 existing files from the repository list.
-- targetFiles must be exact paths from list.
+- Pick up to 8 files.
+- targetFiles may include existing files and up to 4 new files when needed.
+- All targetFiles must be safe relative paths (no ../, no absolute paths).
 - Plan should be concrete and execution-focused.`,
       },
       {
@@ -270,6 +268,7 @@ async function makePatchPlan(params: {
   acceptanceCriteria: string;
   gitStatus: string;
   plan: string[];
+  allowedTargets: string[];
   filePayload: Array<{ path: string; content: string }>;
   preferFileEdits?: boolean;
 }) {
@@ -297,8 +296,8 @@ Rules:
   1) preferred: valid git unified diff in "patch"
   2) fallback: set "patch" to empty and provide "fileEdits" with full updated file content
 - patch must be plain unified diff, no markdown fences.
-- edit only provided files.
-- fileEdits paths must be exact paths from provided files.
+- edit only allowed target files.
+- fileEdits paths must be exact paths from allowed target files.
 - include a patch only when a concrete code change is possible.
 - verificationCommands should be safe local checks (max 3).`,
       },
@@ -319,6 +318,9 @@ ${params.plan.join("\n")}
 
 Execution mode:
 ${params.preferFileEdits ? "Use fileEdits mode only. Set patch to an empty string." : "Prefer patch mode if reliable."}
+
+Allowed target files:
+${params.allowedTargets.join("\n") || "(none provided)"}
 
 Files:
 ${filesJoined}`,
@@ -399,7 +401,19 @@ export async function runWorkerAgenticExecution(params: {
   });
 
   if (tasks.length === 0) return;
-  const cwd = workspaceRoot();
+  const workspaceSetup = await ensureRoomRepoWorkspace({
+    id: room.id,
+    title: room.title,
+    workspacePath: room.workspacePath,
+    repoRemoteUrl: room.repoRemoteUrl,
+    repoDefaultBranch: room.repoDefaultBranch,
+  });
+
+  if (!workspaceSetup.repoReady) {
+    await workerMessage(`Repository workspace is not ready for this room. ${workspaceSetup.repoLastError ?? "Please fix repo setup and retry."}`);
+    return;
+  }
+  const cwd = workspaceSetup.workspacePath;
 
   for (const task of tasks) {
     const lockKey = `${roomId}:${task.id}`;
@@ -434,12 +448,10 @@ export async function runWorkerAgenticExecution(params: {
       const targetFiles = executionPlan.targetFiles.length > 0
         ? executionPlan.targetFiles
         : context.files.slice(0, 3);
-      const filePayload = await readTargetFiles(cwd, targetFiles);
-
-      if (filePayload.length === 0) {
-        await workerMessage(`I couldn't find readable target files for "${task.title}". Please point me to relevant files in this repository.`);
-        continue;
+      if (targetFiles.length === 0) {
+        targetFiles.push("README.md", "docs/implementation-plan.md");
       }
+      const filePayload = await readTargetFiles(cwd, targetFiles);
 
       const patchPlan = await makePatchPlan({
         roomTitle: room.title,
@@ -449,6 +461,7 @@ export async function runWorkerAgenticExecution(params: {
         acceptanceCriteria: task.acceptanceCriteria,
         gitStatus: context.gitStatus,
         plan: executionPlan.plan,
+        allowedTargets: targetFiles,
         filePayload,
       });
 
@@ -457,7 +470,7 @@ export async function runWorkerAgenticExecution(params: {
         continue;
       }
 
-      const allowedPaths = new Set(filePayload.map((f) => f.path));
+      const allowedPaths = new Set([...targetFiles, ...filePayload.map((f) => f.path)]);
       let applyMode: "patch" | "file_edits" | null = null;
       let appliedFiles: string[] = [];
       let firstApplyError: unknown = null;
@@ -490,6 +503,7 @@ export async function runWorkerAgenticExecution(params: {
             acceptanceCriteria: task.acceptanceCriteria,
             gitStatus: context.gitStatus,
             plan: executionPlan.plan,
+            allowedTargets: targetFiles,
             filePayload,
             preferFileEdits: true,
           });

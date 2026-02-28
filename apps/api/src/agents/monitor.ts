@@ -3,12 +3,23 @@ import { prisma } from "../db";
 import { emitEvent } from "../websocket";
 import { masterHandleContractPublished, checkDependencyResolution } from "./master";
 import { workerKickoffAssignedTasks } from "./worker";
+import { getRoomRepoStatus } from "../services/roomRepo";
 
 const SWEEP_INTERVAL_MS = 30 * 1000; // 30 seconds
 const STALE_TASK_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
+const SIGNAL_COOLDOWN_MS = 90 * 1000;
 
 let monitorRunning = false;
 const processedEvents = new Set<string>();
+const lastSignalAt = new Map<string, number>();
+
+function shouldEmitSignal(key: string, cooldownMs = SIGNAL_COOLDOWN_MS) {
+  const now = Date.now();
+  const last = lastSignalAt.get(key) ?? 0;
+  if (now - last < cooldownMs) return false;
+  lastSignalAt.set(key, now);
+  return true;
+}
 
 export function startMasterMonitor(_io: SocketServer) {
   if (monitorRunning) return;
@@ -85,7 +96,7 @@ async function runStartupWorkerKickoff() {
 async function processNewEvents() {
   const recentEvents = await prisma.event.findMany({
     where: {
-      createdAt: { gte: new Date(Date.now() - 10000) }, // Last 10 seconds
+      createdAt: { gte: new Date(Date.now() - 60000) }, // Last 60 seconds
       type: {
         in: [
           "task.status.updated",
@@ -186,6 +197,8 @@ async function masterHandleEvent(
           }
         }
       }
+
+      await monitorRoomRepoSignals(roomId);
       break;
     }
 
@@ -205,6 +218,31 @@ async function masterHandleEvent(
         where: { id: taskId as string },
         data: { status: "blocked", blockedReason: reason },
       });
+      break;
+    }
+
+    case "worker.progress.updated":
+    case "contract.published":
+    case "member.joined": {
+      await monitorRoomRepoSignals(roomId);
+      break;
+    }
+
+    case "master.security.alert": {
+      const severity = String(payload.severity ?? "medium");
+      const message = String(payload.message ?? "Security alert raised.");
+      const dedupeKey = `sec:${roomId}:${message.slice(0, 120)}`;
+      if (shouldEmitSignal(dedupeKey, 120000)) {
+        await prisma.notebookEntry.create({
+          data: {
+            roomId,
+            category: "integration",
+            title: `Security Alert (${severity})`,
+            content: message,
+            references: {},
+          },
+        }).catch(() => undefined);
+      }
       break;
     }
   }
@@ -257,6 +295,7 @@ async function periodicSweep(roomId: string) {
 
   // Validate contract/task graph consistency
   await validateContractGraph(roomId);
+  await monitorRoomRepoSignals(roomId);
 }
 
 async function validateContractGraph(roomId: string) {
@@ -274,6 +313,132 @@ async function validateContractGraph(roomId: string) {
       // Dangling reference — clean up
       await prisma.taskContractDependency.delete({ where: { id: dep.id } });
       console.warn(`[Monitor] Cleaned dangling contract dep ${dep.id} in room ${roomId}`);
+    }
+  }
+}
+
+async function monitorRoomRepoSignals(roomId: string) {
+  let status;
+  try {
+    status = await getRoomRepoStatus(roomId);
+  } catch (err) {
+    const key = `repo-status-failed:${roomId}`;
+    if (shouldEmitSignal(key, 180000)) {
+      await emitEvent({
+        roomId,
+        visibility: "global",
+        type: "master.integration.alert",
+        payload: {
+          severity: "medium",
+          message: `Repository monitoring failed: ${String(err).slice(0, 200)}`,
+          relatedTaskIds: [],
+          relatedContractIds: [],
+        },
+      });
+    }
+    return;
+  }
+
+  if (!status.repoReady) {
+    const key = `repo-not-ready:${roomId}`;
+    if (shouldEmitSignal(key, 180000)) {
+      await emitEvent({
+        roomId,
+        visibility: "global",
+        type: "master.integration.alert",
+        payload: {
+          severity: "high",
+          message: `Repository workspace is not ready. ${status.repoLastError ?? "Agentic execution is paused until this is fixed."}`,
+          relatedTaskIds: [],
+          relatedContractIds: [],
+        },
+      });
+    }
+    return;
+  }
+
+  if (status.mergeConflictFiles.length > 0) {
+    const key = `repo-conflicts:${roomId}:${status.mergeConflictFiles.join(",")}`;
+    if (shouldEmitSignal(key)) {
+      await emitEvent({
+        roomId,
+        visibility: "global",
+        type: "master.integration.alert",
+        payload: {
+          severity: "high",
+          message: `Merge conflicts detected in room repo: ${status.mergeConflictFiles.slice(0, 5).join(", ")}.`,
+          relatedTaskIds: [],
+          relatedContractIds: [],
+        },
+      });
+    }
+  }
+
+  if (status.behindBy > 0) {
+    const key = `repo-behind:${roomId}:${status.behindBy}`;
+    if (shouldEmitSignal(key, 150000)) {
+      await emitEvent({
+        roomId,
+        visibility: "global",
+        type: "master.integration.alert",
+        payload: {
+          severity: "low",
+          message: `Room repo is behind origin by ${status.behindBy} commit(s). Sync recommended before major merges.`,
+          relatedTaskIds: [],
+          relatedContractIds: [],
+        },
+      });
+    }
+  }
+
+  if (status.changedFiles > 40) {
+    const key = `repo-dirty:${roomId}`;
+    if (shouldEmitSignal(key, 120000)) {
+      await emitEvent({
+        roomId,
+        visibility: "global",
+        type: "master.integration.alert",
+        payload: {
+          severity: "low",
+          message: `Large uncommitted delta detected (${status.changedFiles} files). Consider splitting into smaller commits to reduce integration risk.`,
+          relatedTaskIds: [],
+          relatedContractIds: [],
+        },
+      });
+    }
+  }
+
+  if (status.trackedEnvFiles.length > 0) {
+    const key = `tracked-env:${roomId}:${status.trackedEnvFiles.join(",")}`;
+    if (shouldEmitSignal(key, 180000)) {
+      await emitEvent({
+        roomId,
+        visibility: "global",
+        type: "master.security.alert",
+        payload: {
+          severity: "high",
+          message: `Sensitive env file tracked in git: ${status.trackedEnvFiles.slice(0, 5).join(", ")}. Remove and rotate secrets.`,
+          action: "repo.env_file_tracked",
+          detail: status.trackedEnvFiles.join(","),
+        },
+      });
+    }
+  }
+
+  if (status.potentialSecrets.length > 0) {
+    const key = `secret-hit:${roomId}:${status.potentialSecrets[0]}`;
+    if (shouldEmitSignal(key, 180000)) {
+      await emitEvent({
+        roomId,
+        visibility: "global",
+        type: "master.security.alert",
+        payload: {
+          severity: "high",
+          message: `Potential secret detected in repository content. Review immediately.`,
+          action: "repo.potential_secret",
+          detail: status.potentialSecrets.slice(0, 3).join(" | "),
+        },
+      });
     }
   }
 }

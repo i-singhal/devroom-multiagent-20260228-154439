@@ -6,6 +6,7 @@ import { emitEvent } from "../websocket";
 import { masterPlanRoom } from "../agents/master";
 import { workerKickoffAssignedTasks } from "../agents/worker";
 import axios from 'axios';
+import { ensureRoomRepoWorkspace, getRoomRepoStatus, maybeCreateGitHubRepo, syncRoomRepo } from "../services/roomRepo";
 
 const router = Router();
 
@@ -89,13 +90,21 @@ function resolveAssigneeFromHint(hint: string | undefined, members: PlanMember[]
 // POST /rooms
 router.post("/", requireAuth, async (req, res) => {
   try {
-    const data = z.object({ title: z.string().min(1), goal: z.string().min(1) }).parse(req.body);
+    const data = z.object({
+      title: z.string().min(1),
+      goal: z.string().min(1),
+      repositoryUrl: z.string().url().optional(),
+      createGithubRepo: z.boolean().optional(),
+      repositoryName: z.string().min(1).max(100).optional(),
+      githubVisibility: z.enum(["private", "public"]).optional(),
+    }).parse(req.body);
     const user = res.locals.user;
 
     const room = await prisma.room.create({
       data: {
         title: data.title,
         goal: data.goal,
+        repoRemoteUrl: data.repositoryUrl?.trim() || null,
         memberships: {
           create: { userId: user.id, role: "owner" },
         },
@@ -105,11 +114,109 @@ router.post("/", requireAuth, async (req, res) => {
       },
     });
 
-    res.status(201).json(room);
+    let repoRemoteUrl = data.repositoryUrl?.trim() || null;
+    let repoBootstrapNote: string | null = null;
+
+    if (!repoRemoteUrl && (data.createGithubRepo ?? true)) {
+      try {
+        const created = await maybeCreateGitHubRepo({
+          roomId: room.id,
+          roomTitle: room.title,
+          requestedName: data.repositoryName,
+          visibility: data.githubVisibility,
+        });
+        if (created) {
+          repoRemoteUrl = created.cloneUrl;
+          await prisma.room.update({
+            where: { id: room.id },
+            data: {
+              repoRemoteUrl,
+              repoDefaultBranch: created.defaultBranch || "main",
+            },
+          });
+
+          await emitEvent({
+            roomId: room.id,
+            visibility: "global",
+            type: "master.integration.alert",
+            payload: {
+              severity: "low",
+              message: `GitHub repository created for this room: ${created.htmlUrl}`,
+              relatedTaskIds: [],
+              relatedContractIds: [],
+            },
+          });
+        }
+      } catch (err) {
+        repoBootstrapNote = `GitHub auto-create failed: ${String(err).slice(0, 500)}`;
+      }
+    }
+
+    const repoSetup = await ensureRoomRepoWorkspace({
+      id: room.id,
+      title: room.title,
+      workspacePath: room.workspacePath,
+      repoRemoteUrl,
+      repoDefaultBranch: room.repoDefaultBranch,
+    });
+
+    if (repoBootstrapNote || repoSetup.repoLastError) {
+      await emitEvent({
+        roomId: room.id,
+        visibility: "global",
+        type: "master.integration.alert",
+        payload: {
+          severity: "medium",
+          message: `Repository bootstrap warning: ${repoBootstrapNote || repoSetup.repoLastError}`,
+          relatedTaskIds: [],
+          relatedContractIds: [],
+        },
+      });
+    }
+
+    const createdRoom = await prisma.room.findUnique({ where: { id: room.id } });
+    res.status(201).json(createdRoom);
   } catch (err) {
     if (err instanceof z.ZodError) { res.status(400).json({ error: err.errors }); return; }
     console.error(err);
     res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /rooms/:id/repo
+router.get("/:id/repo", requireAuth, requireRoomMember, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const status = await getRoomRepoStatus(id);
+    res.json(status);
+  } catch (err) {
+    console.error("Repo status error:", err);
+    res.status(500).json({ error: "Failed to get repo status", detail: String(err) });
+  }
+});
+
+// POST /rooms/:id/repo/sync
+router.post("/:id/repo/sync", requireAuth, requireRoomAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await syncRoomRepo(id);
+    if (!result.synced) {
+      await emitEvent({
+        roomId: id,
+        visibility: "global",
+        type: "master.integration.alert",
+        payload: {
+          severity: "medium",
+          message: result.reason || result.error || "Repository sync did not complete cleanly.",
+          relatedTaskIds: [],
+          relatedContractIds: [],
+        },
+      });
+    }
+    res.json(result);
+  } catch (err) {
+    console.error("Repo sync error:", err);
+    res.status(500).json({ error: "Failed to sync repo", detail: String(err) });
   }
 });
 
@@ -192,6 +299,14 @@ router.post("/:id/plan", requireAuth, requireRoomAdmin, async (req, res) => {
   try {
     const room = await prisma.room.findUnique({ where: { id } });
     if (!room) { res.status(404).json({ error: "Room not found" }); return; }
+
+    await ensureRoomRepoWorkspace({
+      id: room.id,
+      title: room.title,
+      workspacePath: room.workspacePath,
+      repoRemoteUrl: room.repoRemoteUrl,
+      repoDefaultBranch: room.repoDefaultBranch,
+    });
 
     const members = await prisma.membership.findMany({
       where: { roomId: id },

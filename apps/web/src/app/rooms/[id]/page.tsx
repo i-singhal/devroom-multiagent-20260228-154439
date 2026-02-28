@@ -8,7 +8,7 @@ import MasterTab from "../../../components/master/MasterTab";
 import WorkerTab from "../../../components/worker/WorkerTab";
 import TasksTab from "../../../components/tasks/TasksTab";
 import NotebookTab from "../../../components/notebook/NotebookTab";
-import { Users, Bot, LayoutGrid, BookOpen, Loader2, Link2, LogOut, AlertTriangle } from "lucide-react";
+import { Users, Bot, LayoutGrid, BookOpen, Loader2, Link2, LogOut, AlertTriangle, GitBranch, RefreshCw } from "lucide-react";
 import clsx from "clsx";
 
 const TABS = [
@@ -31,6 +31,8 @@ export default function RoomPage() {
   const [alerts, setAlerts] = useState<any[]>([]);
   const [showInvite, setShowInvite] = useState(false);
   const [inviteUrl, setInviteUrl] = useState("");
+  const [repoStatus, setRepoStatus] = useState<any>(null);
+  const [syncingRepo, setSyncingRepo] = useState(false);
 
   const { on } = useSocket(roomId, user?.id ?? null);
 
@@ -45,13 +47,33 @@ export default function RoomPage() {
     }
   }, [roomId]);
 
+  const fetchRepoStatus = useCallback(async () => {
+    try {
+      const res = await roomsApi.getRepo(roomId);
+      setRepoStatus(res.data);
+    } catch (e) {
+      console.error(e);
+    }
+  }, [roomId]);
+
   useEffect(() => {
     if (!authLoading && !user) {
       router.push("/login");
       return;
     }
-    if (user) fetchRoom();
-  }, [user, authLoading, fetchRoom, router]);
+    if (user) {
+      fetchRoom();
+      fetchRepoStatus();
+    }
+  }, [user, authLoading, fetchRoom, fetchRepoStatus, router]);
+
+  useEffect(() => {
+    if (!user) return;
+    const id = window.setInterval(() => {
+      fetchRepoStatus().catch(() => undefined);
+    }, 8000);
+    return () => window.clearInterval(id);
+  }, [fetchRepoStatus, user]);
 
   // Real-time: listen for events and update state
   useEffect(() => {
@@ -68,13 +90,14 @@ export default function RoomPage() {
       // Refresh room state on task/contract changes
       if (["task.status.updated", "task.assigned", "contract.published", "notebook.entry.added", "member.joined"].includes(evt.type)) {
         fetchRoom();
+        fetchRepoStatus();
       }
     });
 
     return () => {
       if (typeof unsubEvent === "function") unsubEvent();
     };
-  }, [on, fetchRoom]);
+  }, [on, fetchRoom, fetchRepoStatus]);
 
   const createInvite = async () => {
     try {
@@ -87,6 +110,19 @@ export default function RoomPage() {
       setShowInvite(true);
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  const syncRepo = async () => {
+    setSyncingRepo(true);
+    try {
+      await roomsApi.syncRepo(roomId);
+      await fetchRepoStatus();
+      await fetchRoom();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSyncingRepo(false);
     }
   };
 
@@ -115,6 +151,21 @@ export default function RoomPage() {
         </div>
 
         <div className="flex items-center gap-1 ml-auto">
+          <div className={clsx(
+            "hidden md:flex items-center gap-1.5 text-xs rounded-lg border px-2 py-1",
+            repoStatus?.repoReady ? "border-emerald-500/30 text-emerald-300" : "border-red-500/30 text-red-300",
+          )}>
+            <GitBranch className="w-3.5 h-3.5" />
+            <span>{repoStatus?.repoReady ? "Repo Ready" : "Repo Warning"}</span>
+          </div>
+
+          {isAdmin && (
+            <button onClick={syncRepo} className="btn-ghost flex items-center gap-1.5 text-xs" disabled={syncingRepo}>
+              {syncingRepo ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+              <span className="hidden sm:inline">Sync Repo</span>
+            </button>
+          )}
+
           {/* Members */}
           <div className="flex items-center gap-1 text-xs text-slate-400 mr-2">
             <Users className="w-3.5 h-3.5" />
@@ -150,6 +201,12 @@ export default function RoomPage() {
               <button onClick={() => setAlerts((p) => p.filter((x) => x.id !== a.id))} className="ml-auto text-amber-500 hover:text-white">✕</button>
             </div>
           ))}
+        </div>
+      )}
+
+      {repoStatus?.repoLastError && (
+        <div className="bg-red-500/10 border-b border-red-500/20 px-4 py-2 text-xs text-red-300">
+          Repository issue: {repoStatus.repoLastError}
         </div>
       )}
 

@@ -46,9 +46,12 @@ export const authApi = {
 export const roomsApi = {
   list: () => api.get("/rooms"),
   get: (id: string) => api.get(`/rooms/${id}`),
-  create: (title: string, goal: string) => api.post("/rooms", { title, goal }),
+  create: (title: string, goal: string, repositoryUrl?: string) =>
+    api.post("/rooms", { title, goal, repositoryUrl }),
   plan: (id: string) => api.post(`/rooms/${id}/plan`),
   createInvite: (id: string) => api.post(`/rooms/${id}/invites`),
+  getRepo: (id: string) => api.get(`/rooms/${id}/repo`),
+  syncRepo: (id: string) => api.post(`/rooms/${id}/repo/sync`),
 };
 
 // ─── Tasks ────────────────────────────────────────────────────────────────────

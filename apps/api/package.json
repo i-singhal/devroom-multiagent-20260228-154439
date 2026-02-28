@@ -2,12 +2,12 @@
   "name": "@devroom/api",
   "version": "0.1.0",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "bash -lc 'set -a; [ -f ../../.env ] && source ../../.env; set +a; tsx watch src/index.ts'",
     "build": "tsc",
-    "start": "node dist/index.js",
-    "db:push": "prisma db push",
-    "db:migrate": "prisma migrate dev",
-    "db:studio": "prisma studio"
+    "start": "bash -lc 'set -a; [ -f ../../.env ] && source ../../.env; set +a; node dist/index.js'",
+    "db:push": "bash -lc 'set -a; [ -f ../../.env ] && source ../../.env; set +a; prisma db push --schema ../../prisma/schema.prisma'",
+    "db:migrate": "bash -lc 'set -a; [ -f ../../.env ] && source ../../.env; set +a; prisma migrate dev --schema ../../prisma/schema.prisma'",
+    "db:studio": "bash -lc 'set -a; [ -f ../../.env ] && source ../../.env; set +a; prisma studio --schema ../../prisma/schema.prisma'"
   },
   "dependencies": {
     "openai": "^4.67.0",
