@@ -453,3 +453,54 @@ export async function syncRoomRepo(roomId: string) {
     status: await getRoomRepoStatus(roomId),
   };
 }
+
+export async function commitAndMaybePushRoomRepo(params: {
+  roomId: string;
+  workspacePath: string;
+  taskTitle: string;
+}) {
+  const { roomId, workspacePath, taskTitle } = params;
+
+  const status = await runCmd(workspacePath, "git", ["status", "--porcelain"], 60000)
+    .then((r) => r.stdout.trim())
+    .catch(() => "");
+  if (!status) {
+    return { committed: false, pushed: false, commitSha: null as string | null, pushError: null as string | null };
+  }
+
+  await runCmd(workspacePath, "git", ["add", "-A"], 60000);
+  await runCmd(workspacePath, "git", ["commit", "-m", `worker: ${taskTitle}`], 120000);
+
+  const commitSha = await runCmd(workspacePath, "git", ["rev-parse", "--short", "HEAD"], 60000)
+    .then((r) => r.stdout.trim())
+    .catch(() => null);
+
+  const branch = await runCmd(workspacePath, "git", ["rev-parse", "--abbrev-ref", "HEAD"], 60000)
+    .then((r) => r.stdout.trim())
+    .catch(() => "main");
+
+  let pushed = false;
+  let pushError: string | null = null;
+  const remote = await runCmd(workspacePath, "git", ["remote", "get-url", "origin"], 60000)
+    .then((r) => r.stdout.trim())
+    .catch(() => "");
+
+  if (remote) {
+    try {
+      await runCmd(workspacePath, "git", ["push", "origin", branch], 180000);
+      pushed = true;
+    } catch (err) {
+      pushError = String(err).slice(0, 500);
+    }
+  }
+
+  await prisma.room.update({
+    where: { id: roomId },
+    data: {
+      repoLastSyncedAt: new Date(),
+      repoLastError: pushError,
+    },
+  }).catch(() => undefined);
+
+  return { committed: true, pushed, commitSha, pushError };
+}

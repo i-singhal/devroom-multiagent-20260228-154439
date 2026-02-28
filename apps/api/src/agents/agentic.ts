@@ -5,7 +5,7 @@ import os from "os";
 import path from "path";
 import { prisma } from "../db";
 import { emitEvent } from "../websocket";
-import { ensureRoomRepoWorkspace } from "../services/roomRepo";
+import { commitAndMaybePushRoomRepo, ensureRoomRepoWorkspace } from "../services/roomRepo";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const AGENTIC_MODEL = "gpt-4o";
@@ -147,7 +147,7 @@ async function canRunVerificationCommand(cwd: string, cmd: string): Promise<bool
     const pkg = JSON.parse(pkgRaw) as { scripts?: Record<string, unknown> };
     return !!pkg.scripts && Object.prototype.hasOwnProperty.call(pkg.scripts, scriptName);
   } catch {
-    return true;
+    return false;
   }
 }
 
@@ -560,6 +560,26 @@ export async function runWorkerAgenticExecution(params: {
       });
       await emitTaskStatus(roomId, task.id, task.title, "review");
 
+      const gitResult = await commitAndMaybePushRoomRepo({
+        roomId,
+        workspacePath: cwd,
+        taskTitle: task.title,
+      });
+
+      if (gitResult.pushError) {
+        await emitEvent({
+          roomId,
+          visibility: "global",
+          type: "master.integration.alert",
+          payload: {
+            severity: "medium",
+            message: `Repo push failed after task "${task.title}". Manual push may be required.`,
+            relatedTaskIds: [task.id],
+            relatedContractIds: [],
+          },
+        });
+      }
+
       await prisma.notebookEntry.create({
         data: {
           roomId,
@@ -577,6 +597,9 @@ export async function runWorkerAgenticExecution(params: {
           ? `Applied direct file edits to: ${appliedFiles.join(", ")}.`
           : "Applied patch successfully.",
         patchPlan.progressSummary,
+        gitResult.committed
+          ? `Created commit${gitResult.commitSha ? ` ${gitResult.commitSha}` : ""}.${gitResult.pushed ? " Pushed to remote." : " Not pushed to remote."}`
+          : "No commit created (no detectable file delta).",
         verificationLogs.length > 0 ? `Verification:\n${verificationLogs.join("\n\n")}` : "No verification command was executed.",
       ].join("\n\n"));
 

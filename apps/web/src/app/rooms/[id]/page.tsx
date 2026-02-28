@@ -75,6 +75,14 @@ export default function RoomPage() {
     return () => window.clearInterval(id);
   }, [fetchRepoStatus, user]);
 
+  useEffect(() => {
+    if (!user) return;
+    const id = window.setInterval(() => {
+      fetchRoom().catch(() => undefined);
+    }, 4000);
+    return () => window.clearInterval(id);
+  }, [fetchRoom, user]);
+
   // Real-time: listen for events and update state
   useEffect(() => {
     const unsubEvent = on("event.new", (evt: any) => {
@@ -84,7 +92,7 @@ export default function RoomPage() {
         // Auto-dismiss after 10s
         setTimeout(() => {
           setAlerts((prev) => prev.filter((a) => a.id !== evt.id));
-        }, 10000);
+        }, 20000);
       }
 
       // Refresh room state on task/contract changes
