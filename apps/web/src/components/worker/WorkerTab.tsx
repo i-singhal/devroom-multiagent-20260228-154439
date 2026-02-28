@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { messagesApi, tasksApi, contractsApi } from "../../lib/api";
 import { useSocket } from "../../hooks/useSocket";
 import { Send, Loader2, Lock, AlertOctagon, Share2, FileEdit, CheckCircle, Clock } from "lucide-react";
@@ -22,6 +22,19 @@ const STATUS_COLORS: Record<string, string> = {
   done: "bg-green-600/20 text-green-300",
 };
 
+function mergeMessages(existing: any[], incoming: any[]) {
+  const map = new Map<string, any>();
+  for (const msg of existing) {
+    if (msg?.id) map.set(msg.id, msg);
+  }
+  for (const msg of incoming) {
+    if (msg?.id) map.set(msg.id, msg);
+  }
+  return Array.from(map.values()).sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+  );
+}
+
 export default function WorkerTab({ roomId, userId, userName, tasks }: Props) {
   const [messages, setMessages] = useState<any[]>([]);
   const [input, setInput] = useState("");
@@ -35,20 +48,28 @@ export default function WorkerTab({ roomId, userId, userName, tasks }: Props) {
 
   const myTasks = tasks.filter((t) => t.assignedUserId === userId);
 
+  const fetchMessages = useCallback(async () => {
+    const r = await messagesApi.list(roomId, "worker");
+    setMessages((prev) => mergeMessages(prev, r.data));
+  }, [roomId]);
+
   useEffect(() => {
-    messagesApi.list(roomId, "worker")
-      .then((r) => setMessages(r.data))
+    fetchMessages()
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [roomId]);
+  }, [fetchMessages]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      fetchMessages().catch(() => undefined);
+    }, 2500);
+    return () => window.clearInterval(id);
+  }, [fetchMessages]);
 
   useEffect(() => {
     const unsub = on("message.new", (msg: any) => {
       if (msg.channel === "worker" && msg.ownerUserId === userId) {
-        setMessages((prev) => {
-          if (prev.find((m) => m.id === msg.id)) return prev;
-          return [...prev, msg];
-        });
+        setMessages((prev) => mergeMessages(prev, [msg]));
       }
     });
     return unsub;
@@ -64,7 +85,8 @@ export default function WorkerTab({ roomId, userId, userName, tasks }: Props) {
     setInput("");
     setSending(true);
     try {
-      await messagesApi.sendWorker(roomId, content);
+      const created = await messagesApi.sendWorker(roomId, content);
+      setMessages((prev) => mergeMessages(prev, [created.data]));
     } catch (e) {
       console.error(e);
       setInput(content);

@@ -14,6 +14,19 @@ interface Props {
   tasks: any[];
 }
 
+function mergeMessages(existing: any[], incoming: any[]) {
+  const map = new Map<string, any>();
+  for (const msg of existing) {
+    if (msg?.id) map.set(msg.id, msg);
+  }
+  for (const msg of incoming) {
+    if (msg?.id) map.set(msg.id, msg);
+  }
+  return Array.from(map.values()).sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+  );
+}
+
 export default function MasterTab({ roomId, userId, userName, isAdmin, tasks }: Props) {
   const [messages, setMessages] = useState<any[]>([]);
   const [input, setInput] = useState("");
@@ -23,20 +36,28 @@ export default function MasterTab({ roomId, userId, userName, isAdmin, tasks }: 
   const bottomRef = useRef<HTMLDivElement>(null);
   const { on } = useSocket(roomId, userId);
 
+  const fetchMessages = useCallback(async () => {
+    const r = await messagesApi.list(roomId, "master");
+    setMessages((prev) => mergeMessages(prev, r.data));
+  }, [roomId]);
+
   useEffect(() => {
-    messagesApi.list(roomId, "master")
-      .then((r) => setMessages(r.data))
+    fetchMessages()
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [roomId]);
+  }, [fetchMessages]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      fetchMessages().catch(() => undefined);
+    }, 2500);
+    return () => window.clearInterval(id);
+  }, [fetchMessages]);
 
   useEffect(() => {
     const unsub = on("message.new", (msg: any) => {
       if (msg.channel === "master") {
-        setMessages((prev) => {
-          if (prev.find((m) => m.id === msg.id)) return prev;
-          return [...prev, msg];
-        });
+        setMessages((prev) => mergeMessages(prev, [msg]));
       }
     });
     return unsub;
@@ -52,7 +73,8 @@ export default function MasterTab({ roomId, userId, userName, isAdmin, tasks }: 
     setInput("");
     setSending(true);
     try {
-      await messagesApi.sendMaster(roomId, content);
+      const created = await messagesApi.sendMaster(roomId, content);
+      setMessages((prev) => mergeMessages(prev, [created.data]));
     } catch (e) {
       console.error(e);
       setInput(content);
