@@ -1,0 +1,21 @@
+{
+  "name": "devroom",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace=apps/api\" \"npm run dev --workspace=apps/web\"",
+    "dev:api": "npm run dev --workspace=apps/api",
+    "dev:web": "npm run dev --workspace=apps/web",
+    "build": "npm run build --workspace=@devroom/shared && npm run build --workspace=@devroom/api && npm run build --workspace=@devroom/web",
+    "db:push": "npm run db:push --workspace=apps/api",
+    "db:migrate": "npm run db:migrate --workspace=apps/api",
+    "db:studio": "npm run db:studio --workspace=apps/api"
+  },
+  "devDependencies": {
+    "@esbuild/darwin-arm64": "^0.27.3",
+    "concurrently": "^9.0.1"
+  }
+}

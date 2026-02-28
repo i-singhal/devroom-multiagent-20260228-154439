@@ -1,0 +1,237 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  password  String
+  createdAt DateTime @default(now())
+
+  memberships      Membership[]
+  assignedTasks    Task[]         @relation("AssignedTasks")
+  workerMessages   Message[]      @relation("WorkerMessages")
+  senderMessages   Message[]      @relation("SenderMessages")
+  visibleEvents    Event[]        @relation("VisibleEvents")
+  proposedVersions ContractVersion[] @relation("ProposedVersions")
+}
+
+model Room {
+  id        String   @id @default(uuid())
+  title     String
+  goal      String
+  createdAt DateTime @default(now())
+
+  memberships  Membership[]
+  agents       AgentInstance[]
+  tasks        Task[]
+  contracts    Contract[]
+  messages     Message[]
+  events       Event[]
+  notebook     NotebookEntry[]
+  invites      Invite[]
+}
+
+model Membership {
+  id        String         @id @default(uuid())
+  roomId    String
+  userId    String
+  role      MembershipRole @default(collaborator)
+  createdAt DateTime       @default(now())
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId])
+}
+
+enum MembershipRole {
+  owner
+  admin
+  collaborator
+}
+
+model AgentInstance {
+  id        String    @id @default(uuid())
+  roomId    String
+  type      AgentType
+  userId    String?
+  createdAt DateTime  @default(now())
+
+  room            Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  senderMessages  Message[] @relation("AgentSenderMessages")
+}
+
+enum AgentType {
+  master
+  worker
+}
+
+model Task {
+  id                 String     @id @default(uuid())
+  roomId             String
+  title              String
+  description        String
+  acceptanceCriteria String
+  status             TaskStatus @default(todo)
+  assignedUserId     String?
+  blockedReason      String?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  room              Room                   @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  assignedUser      User?                  @relation("AssignedTasks", fields: [assignedUserId], references: [id])
+  fromDependencies  TaskDependency[]       @relation("FromTask")
+  toDependencies    TaskDependency[]       @relation("ToTask")
+  contractDeps      TaskContractDependency[]
+}
+
+enum TaskStatus {
+  todo
+  in_progress
+  blocked
+  review
+  done
+}
+
+model TaskDependency {
+  id         String @id @default(uuid())
+  roomId     String
+  fromTaskId String
+  toTaskId   String
+
+  fromTask Task @relation("FromTask", fields: [fromTaskId], references: [id], onDelete: Cascade)
+  toTask   Task @relation("ToTask", fields: [toTaskId], references: [id], onDelete: Cascade)
+
+  @@unique([fromTaskId, toTaskId])
+}
+
+model Contract {
+  id               String       @id @default(uuid())
+  roomId           String
+  name             String
+  type             ContractType
+  currentVersionId String?
+  createdAt        DateTime     @default(now())
+
+  room         Room                   @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  versions     ContractVersion[]
+  taskDeps     TaskContractDependency[]
+}
+
+enum ContractType {
+  openapi
+  typescript
+  protobuf
+  jsonschema
+  other
+}
+
+model ContractVersion {
+  id         String   @id @default(uuid())
+  contractId String
+  version    Int
+  content    String
+  summary    String
+  breaking   Boolean  @default(false)
+  proposedBy String?
+  createdAt  DateTime @default(now())
+
+  contract  Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  proposer  User?    @relation("ProposedVersions", fields: [proposedBy], references: [id])
+}
+
+model TaskContractDependency {
+  id             String         @id @default(uuid())
+  taskId         String
+  contractId     String
+  dependencyType DependencyType
+
+  task     Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  contract Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, contractId])
+}
+
+enum DependencyType {
+  consumes
+  produces
+  modifies
+}
+
+model Message {
+  id            String         @id @default(uuid())
+  roomId        String
+  channel       MessageChannel
+  ownerUserId   String?
+  senderUserId  String?
+  senderAgentId String?
+  content       String
+  createdAt     DateTime       @default(now())
+
+  room        Room           @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  ownerUser   User?          @relation("WorkerMessages", fields: [ownerUserId], references: [id])
+  senderUser  User?          @relation("SenderMessages", fields: [senderUserId], references: [id])
+  senderAgent AgentInstance? @relation("AgentSenderMessages", fields: [senderAgentId], references: [id])
+}
+
+enum MessageChannel {
+  master
+  worker
+}
+
+model Event {
+  id              String          @id @default(uuid())
+  roomId          String
+  visibility      EventVisibility
+  visibleToUserId String?
+  type            String
+  payload         Json
+  createdAt       DateTime        @default(now())
+
+  room         Room  @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  visibleToUser User? @relation("VisibleEvents", fields: [visibleToUserId], references: [id])
+}
+
+enum EventVisibility {
+  global
+  user
+}
+
+model NotebookEntry {
+  id         String        @id @default(uuid())
+  roomId     String
+  category   EntryCategory
+  title      String
+  content    String
+  references Json          @default("{}")
+  createdAt  DateTime      @default(now())
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+}
+
+enum EntryCategory {
+  decision
+  contract_change
+  task_update
+  integration
+  blocker
+  summary
+}
+
+model Invite {
+  id        String   @id @default(uuid())
+  roomId    String
+  token     String   @unique @default(uuid())
+  usedBy    String?
+  createdAt DateTime @default(now())
+  expiresAt DateTime?
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+}
