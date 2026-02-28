@@ -97,7 +97,7 @@ function getActiveExecutionTaskIds(
   const allowBlockedRetry = shouldRetryBlockedTask(userMessage);
   return assignedTasks
     .filter((task) => {
-      if (task.status === "todo" || task.status === "in_progress") return true;
+      if (task.status === "todo" || task.status === "in_progress" || task.status === "review") return true;
       if (!allowBlockedRetry || task.status !== "blocked") return false;
       const reason = (task.blockedReason ?? "").toLowerCase();
       return reason.includes("agentic") || reason.includes("patch") || reason.includes("verification");

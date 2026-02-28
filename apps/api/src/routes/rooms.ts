@@ -314,8 +314,7 @@ router.post("/:id/plan", requireAuth, requireRoomAdmin, async (req, res) => {
     });
 
     const result = await masterPlanRoom(room, members);
-    const preferredMembers = members.filter((m) => m.role !== "owner");
-    const assignableMembers = (preferredMembers.length > 0 ? preferredMembers : members)
+    const assignableMembers = members
       .slice()
       .sort((a, b) => roleRank(a.role) - roleRank(b.role));
 

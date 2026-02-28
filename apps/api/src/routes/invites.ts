@@ -26,8 +26,7 @@ async function rebalanceTodoTasks(roomId: string) {
   });
   if (members.length === 0) return;
 
-  const preferredMembers = members.filter((m) => m.role !== "owner");
-  const assignees = (preferredMembers.length > 0 ? preferredMembers : members)
+  const assignees = members
     .slice()
     .sort((a, b) => roleRank(a.role) - roleRank(b.role));
   if (assignees.length === 0) return;

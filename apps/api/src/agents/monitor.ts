@@ -146,6 +146,21 @@ async function masterHandleEvent(
         // Ensure notebook entry exists
         const task = await prisma.task.findUnique({ where: { id: taskId as string } });
         if (task) {
+          const blockedKey = `task-blocked:${roomId}:${task.id}:${task.blockedReason ?? ""}`;
+          if (shouldEmitSignal(blockedKey, 45000)) {
+            await emitEvent({
+              roomId,
+              visibility: "global",
+              type: "master.integration.alert",
+              payload: {
+                severity: "medium",
+                message: `Task blocked: "${task.title}"${task.blockedReason ? ` — ${task.blockedReason}` : ""}`,
+                relatedTaskIds: [task.id],
+                relatedContractIds: [],
+              },
+            });
+          }
+
           const recentEntry = await prisma.notebookEntry.findFirst({
             where: {
               roomId,
