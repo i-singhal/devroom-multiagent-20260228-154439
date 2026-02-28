@@ -5,8 +5,33 @@ import { requireAuth, requireRoomMember, requireRoomAdmin } from "../middleware/
 import { emitEvent } from "../websocket";
 import { masterPlanRoom } from "../agents/master";
 import { workerKickoffAssignedTasks } from "../agents/worker";
+import axios from 'axios';
 
 const router = Router();
+
+const API_KEY = process.env.YOUTUBE_API_KEY;
+const YOUTUBE_API_URL = "https://www.googleapis.com/youtube/v3/search";
+
+async function fetchYouTubeTitles(query: string) {
+  try {
+    const response = await axios.get(YOUTUBE_API_URL, {
+      params: {
+        part: 'snippet',
+        q: query,
+        key: API_KEY,
+        maxResults: 5
+      }
+    });
+
+    return response.data.items.map((item: any) => item.snippet.title);
+  } catch (error) {
+    console.error("Error fetching YouTube titles:", error);
+    throw new Error("Failed to fetch YouTube titles");
+  }
+}
+
+
+// Existing functions...
 
 type PlanMember = {
   userId: string;
@@ -85,6 +110,25 @@ router.post("/", requireAuth, async (req, res) => {
     if (err instanceof z.ZodError) { res.status(400).json({ error: err.errors }); return; }
     console.error(err);
     res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Fetch YouTube titles
+router.get("/:id/youtube-titles", requireAuth, requireRoomMember, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const room = await prisma.room.findUnique({ where: { id } });
+
+    if (!room) {
+      res.status(404).json({ error: "Room not found" });
+      return;
+    }
+
+    const titles = await fetchYouTubeTitles(room.title);
+    res.json({ titles });
+  } catch (err) {
+    console.error("Error fetching YouTube titles:", err);
+    res.status(500).json({ error: "Failed to fetch YouTube titles" });
   }
 });
 

@@ -79,7 +79,11 @@ export default function RoomPage() {
   const createInvite = async () => {
     try {
       const res = await roomsApi.createInvite(roomId);
-      setInviteUrl(res.data.url);
+      const token = typeof res.data?.token === "string" ? res.data.token : "";
+      const dynamicUrl = token && typeof window !== "undefined"
+        ? `${window.location.origin}/invite/${token}`
+        : "";
+      setInviteUrl(dynamicUrl || res.data.url);
       setShowInvite(true);
     } catch (e) {
       console.error(e);

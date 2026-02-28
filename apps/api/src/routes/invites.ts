@@ -98,7 +98,13 @@ router.post("/:id/invites", requireAuth, requireRoomAdmin, async (req, res) => {
     },
   });
 
-  const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+  const requestOrigin = req.get("origin");
+  const requestHost = req.get("x-forwarded-host") || req.get("host");
+  const requestProto = req.get("x-forwarded-proto") || req.protocol;
+  const inferredFrontUrl = requestOrigin || (requestHost ? `${requestProto}://${requestHost}` : undefined);
+  const configuredFrontUrl = process.env.PUBLIC_FRONTEND_URL
+    || process.env.FRONTEND_URL?.split(",").map((value) => value.trim()).find(Boolean);
+  const baseUrl = inferredFrontUrl || configuredFrontUrl || "http://localhost:3000";
   res.status(201).json({
     token: invite.token,
     url: `${baseUrl}/invite/${invite.token}`,

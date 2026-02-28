@@ -141,6 +141,7 @@ function extractRunScriptName(cmd: string): string | null {
 
 async function canRunVerificationCommand(cwd: string, cmd: string): Promise<boolean> {
   if (!isSafeVerificationCommand(cmd)) return false;
+  if (/\bNODE_ENV\s*=/i.test(cmd)) return false;
   const scriptName = extractRunScriptName(cmd);
   if (!scriptName) return true;
 

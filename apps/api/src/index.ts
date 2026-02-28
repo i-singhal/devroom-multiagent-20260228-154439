@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import type { RequestHandler } from "express";
+import type { CorsOptions } from "cors";
 import cors from "cors";
 import session from "express-session";
 import { createServer } from "http";
@@ -20,17 +21,37 @@ import authRoutes from "./routes/auth";
 
 const app = express();
 const httpServer = createServer(app);
+const allowedOrigins = (process.env.CORS_ORIGINS || process.env.FRONTEND_URL || "http://localhost:3000")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
+const isProd = process.env.NODE_ENV === "production";
+
+const isOriginAllowed = (origin?: string): boolean => {
+  if (!origin) return true;
+  if (allowedOrigins.includes("*")) return true;
+  if (allowedOrigins.includes(origin)) return true;
+  return !isProd;
+};
+
+const corsOrigin: CorsOptions["origin"] = (origin, callback) => {
+  if (isOriginAllowed(origin)) {
+    callback(null, true);
+    return;
+  }
+  callback(new Error("Origin not allowed by CORS"));
+};
 
 export const io = new SocketServer(httpServer, {
   cors: {
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    origin: corsOrigin,
     credentials: true,
   },
 });
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(cors({
-  origin: process.env.FRONTEND_URL || "http://localhost:3000",
+  origin: corsOrigin,
   credentials: true,
 }));
 app.use(express.json());

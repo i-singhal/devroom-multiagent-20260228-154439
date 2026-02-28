@@ -2,7 +2,31 @@
 import { useEffect, useRef, useCallback } from "react";
 import { io, Socket } from "socket.io-client";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+function isLocalhostUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function resolveSocketUrl(): string | undefined {
+  const rawSocket = (process.env.NEXT_PUBLIC_SOCKET_URL || "").trim();
+  if (rawSocket && rawSocket.startsWith("http") && !isLocalhostUrl(rawSocket)) {
+    return rawSocket;
+  }
+
+  const rawApi = (process.env.NEXT_PUBLIC_API_URL || "").trim();
+  if (rawApi && rawApi.startsWith("http") && !isLocalhostUrl(rawApi)) {
+    return rawApi;
+  }
+
+  // Same-origin socket (proxied by Next.js) is safest for shared links.
+  return undefined;
+}
+
+const SOCKET_URL = resolveSocketUrl();
 
 type EventHandler = (data: unknown) => void;
 
@@ -40,7 +64,7 @@ export function useSocket(roomId: string | null, userId: string | null) {
       currentRoomId = roomId;
       currentUserId = userId;
 
-      sharedSocket = io(API_URL, {
+      sharedSocket = io(SOCKET_URL, {
         withCredentials: true,
         auth: { roomId, userId },
       });

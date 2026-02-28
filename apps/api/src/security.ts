@@ -18,7 +18,7 @@ export async function emitSecurityAlert(params: {
   if (!roomExists) return;
 
   const actor = userName ?? userId ?? "unknown";
-  const message = `🔐 Security alert: ${actor} attempted "${action}"${detail ? ` (${detail})` : ""}.`;
+  const message = `Security alert: ${actor} attempted "${action}"${detail ? ` (${detail})` : ""}.`;
 
   await emitEvent({
     roomId,

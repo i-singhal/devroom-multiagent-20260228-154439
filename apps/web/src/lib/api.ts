@@ -1,12 +1,36 @@
 import axios from "axios";
 
-export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+function isLocalhostUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function resolveApiBase(): string {
+  const raw = (process.env.NEXT_PUBLIC_API_URL || "").trim();
+  if (!raw) return "/api";
+  if (raw.startsWith("/")) return raw;
+  if (raw.startsWith("http")) {
+    return isLocalhostUrl(raw) ? "/api" : raw;
+  }
+  return "/api";
+}
+
+export const API_BASE = resolveApiBase();
 
 export const api = axios.create({
   baseURL: API_BASE,
   withCredentials: true,
   headers: { "Content-Type": "application/json" },
 });
+
+// ─── YouTube ─────────────────────────────────────────────────────────────────
+export const youtubeApi = {
+  search: (query: string) => api.get(`/youtube/search`, { params: { query } }),
+};
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 export const authApi = {
