@@ -8,7 +8,7 @@ import { emitEvent } from "../websocket";
 import { commitAndMaybePushRoomRepo, ensureRoomRepoWorkspace } from "../services/roomRepo";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const AGENTIC_MODEL = process.env.OPENAI_MODEL?.trim() || "gpt-5.3-codex";
+const AGENTIC_MODEL = process.env.OPENAI_MODEL?.trim() || "gpt-4o";
 const executionLocks = new Set<string>();
 const TARGET_FILE_LIMIT = 6;
 const TARGET_FILE_CREATION_LIMIT = 2;

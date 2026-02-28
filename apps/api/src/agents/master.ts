@@ -5,8 +5,8 @@ import type { MasterPlanOutput } from "@devroom/shared";
 import { workerKickoffAssignedTasks } from "./worker";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const MASTER_MODEL = process.env.OPENAI_MODEL?.trim() || "gpt-5.3-codex";
-const FAST_MODEL = process.env.OPENAI_FAST_MODEL?.trim() || MASTER_MODEL;
+const MASTER_MODEL = process.env.OPENAI_MODEL?.trim() || "gpt-4o";
+const FAST_MODEL = process.env.OPENAI_FAST_MODEL?.trim() || "gpt-4o-mini";
 
 type RoomMember = {
   userId: string;

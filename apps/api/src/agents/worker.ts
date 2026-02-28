@@ -4,7 +4,7 @@ import { emitEvent, emitMessage } from "../websocket";
 import { runWorkerAgenticExecution } from "./agentic";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const WORKER_MODEL = process.env.OPENAI_MODEL?.trim() || "gpt-5.3-codex";
+const WORKER_MODEL = process.env.OPENAI_MODEL?.trim() || "gpt-4o";
 const REFUSAL_PATTERN = /(i\s+(?:can(?:not|'t)|do(?:\s+not|'nt)\s+have)\s+(?:the\s+)?capability|i(?:'m| am)\s+unable|as an ai[, ]+i\s+don'?t)/i;
 const activeExecutionRuns = new Set<string>();
 
