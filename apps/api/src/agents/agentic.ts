@@ -8,8 +8,65 @@ import { emitEvent } from "../websocket";
 import { commitAndMaybePushRoomRepo, ensureRoomRepoWorkspace } from "../services/roomRepo";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const AGENTIC_MODEL = "gpt-4o";
+const AGENTIC_MODEL = process.env.OPENAI_MODEL?.trim() || "gpt-5.3-codex";
 const executionLocks = new Set<string>();
+const TARGET_FILE_LIMIT = 6;
+const TARGET_FILE_CREATION_LIMIT = 2;
+const FILE_CONTENT_PREVIEW_LIMIT = 20000;
+
+const EDITABLE_FILE_EXTENSIONS = new Set([
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".json",
+  ".md",
+  ".css",
+  ".scss",
+  ".html",
+  ".yml",
+  ".yaml",
+  ".sql",
+  ".prisma",
+  ".py",
+  ".go",
+  ".rs",
+  ".java",
+  ".kt",
+  ".rb",
+  ".php",
+  ".sh",
+  ".toml",
+]);
+
+const BLOCKED_BINARY_EXTENSIONS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".svg",
+  ".webp",
+  ".ico",
+  ".pdf",
+  ".zip",
+  ".mp4",
+  ".mp3",
+  ".mov",
+  ".wav",
+  ".ttf",
+  ".woff",
+  ".woff2",
+]);
+
+const ALLOWED_EXTENSIONLESS_FILES = new Set([
+  "dockerfile",
+  "makefile",
+  ".gitignore",
+  ".npmrc",
+  ".env.example",
+]);
 
 type ExecutionPlan = {
   plan: string[];
@@ -57,42 +114,12 @@ function sanitizeFileList(filesRaw: string): string[] {
     ".vscode/",
   ];
 
-  const allowedExtensions = new Set([
-    ".ts",
-    ".tsx",
-    ".js",
-    ".jsx",
-    ".mjs",
-    ".cjs",
-    ".json",
-    ".md",
-    ".css",
-    ".scss",
-    ".html",
-    ".yml",
-    ".yaml",
-    ".sql",
-    ".prisma",
-    ".py",
-    ".go",
-    ".rs",
-    ".java",
-    ".kt",
-    ".rb",
-    ".php",
-    ".sh",
-    ".toml",
-  ]);
-
   return filesRaw
     .split("\n")
     .map((f) => f.trim())
     .filter(Boolean)
     .filter((f) => !blockedDirs.some((dir) => f.startsWith(dir)))
-    .filter((f) => {
-      const ext = path.extname(f).toLowerCase();
-      return allowedExtensions.has(ext) || f.endsWith("Dockerfile");
-    })
+    .filter((f) => isEditableTargetPath(f))
     .slice(0, 1000);
 }
 
@@ -100,6 +127,121 @@ function isSafeRelativePath(p: string): boolean {
   if (!p || path.isAbsolute(p)) return false;
   if (p.includes("..")) return false;
   return true;
+}
+
+function normalizeRelPath(p: string) {
+  return p.replace(/\\/g, "/");
+}
+
+function isEditableTargetPath(relPath: string): boolean {
+  if (!isSafeRelativePath(relPath)) return false;
+  const normalized = normalizeRelPath(relPath);
+  const ext = path.extname(normalized).toLowerCase();
+  if (ext && BLOCKED_BINARY_EXTENSIONS.has(ext)) return false;
+  if (ext) return EDITABLE_FILE_EXTENSIONS.has(ext);
+  return ALLOWED_EXTENSIONLESS_FILES.has(path.basename(normalized).toLowerCase());
+}
+
+function canCreatePathInWorkspace(relPath: string, existingFiles: string[]) {
+  const normalized = normalizeRelPath(relPath);
+  const dir = path.posix.dirname(normalized);
+  if (dir === "." || dir === "") return true;
+  return existingFiles.some((file) => file.startsWith(`${dir}/`));
+}
+
+function tokenizeForFileMatch(value: string) {
+  const stopWords = new Set([
+    "the",
+    "and",
+    "for",
+    "with",
+    "from",
+    "into",
+    "that",
+    "this",
+    "user",
+    "task",
+    "feature",
+    "implement",
+    "setup",
+    "build",
+  ]);
+  return value
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 3 && !stopWords.has(token))
+    .slice(0, 30);
+}
+
+function selectTargetFiles(params: {
+  requestedTargets: string[];
+  workspaceFiles: string[];
+  taskTitle: string;
+  taskDescription: string;
+  acceptanceCriteria: string;
+}) {
+  const { requestedTargets, workspaceFiles, taskTitle, taskDescription, acceptanceCriteria } = params;
+  const workspaceSet = new Set(workspaceFiles);
+  const selected: string[] = [];
+  const seen = new Set<string>();
+
+  const push = (file: string) => {
+    const normalized = normalizeRelPath(file);
+    if (seen.has(normalized)) return;
+    if (!isEditableTargetPath(normalized)) return;
+    seen.add(normalized);
+    selected.push(normalized);
+  };
+
+  for (const file of requestedTargets.map((f) => normalizeRelPath(String(f).trim()))) {
+    if (!file) continue;
+    if (workspaceSet.has(file)) {
+      push(file);
+    }
+  }
+
+  let created = 0;
+  for (const file of requestedTargets.map((f) => normalizeRelPath(String(f).trim()))) {
+    if (!file || workspaceSet.has(file)) continue;
+    if (!canCreatePathInWorkspace(file, workspaceFiles)) continue;
+    if (created >= TARGET_FILE_CREATION_LIMIT) break;
+    push(file);
+    created += 1;
+  }
+
+  if (selected.length >= TARGET_FILE_LIMIT) {
+    return selected.slice(0, TARGET_FILE_LIMIT);
+  }
+
+  const tokens = tokenizeForFileMatch(`${taskTitle} ${taskDescription} ${acceptanceCriteria}`);
+  const ranked = workspaceFiles
+    .filter((file) => isEditableTargetPath(file))
+    .map((file) => {
+      const lower = file.toLowerCase();
+      const base = path.basename(lower);
+      const score = tokens.reduce((sum, token) => {
+        if (base.includes(token)) return sum + 5;
+        if (lower.includes(token)) return sum + 2;
+        return sum;
+      }, lower.includes("src/") || lower.includes("app/") ? 1 : 0);
+      return { file, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .map((entry) => entry.file);
+
+  for (const file of ranked) {
+    if (selected.length >= TARGET_FILE_LIMIT) break;
+    push(file);
+  }
+
+  if (selected.length === 0) {
+    for (const file of workspaceFiles) {
+      if (selected.length >= TARGET_FILE_LIMIT) break;
+      push(file);
+    }
+  }
+
+  return selected.slice(0, TARGET_FILE_LIMIT);
 }
 
 function isSafeVerificationCommand(cmd: string): boolean {
@@ -151,6 +293,60 @@ async function canRunVerificationCommand(cwd: string, cmd: string): Promise<bool
   }
 }
 
+async function getPackageScripts(cwd: string): Promise<Record<string, string>> {
+  try {
+    const pkgRaw = await fs.readFile(path.join(cwd, "package.json"), "utf8");
+    const pkg = JSON.parse(pkgRaw) as { scripts?: Record<string, string> };
+    return pkg.scripts ?? {};
+  } catch {
+    return {};
+  }
+}
+
+async function getFallbackVerificationCommands(cwd: string): Promise<string[]> {
+  const scripts = await getPackageScripts(cwd);
+  const priorities = ["typecheck", "lint", "test", "build", "check"];
+  const selected: string[] = [];
+
+  for (const name of priorities) {
+    if (!Object.prototype.hasOwnProperty.call(scripts, name)) continue;
+    selected.push(`npm run ${name}`);
+    if (selected.length >= 2) break;
+  }
+
+  return selected;
+}
+
+async function snapshotTargetFiles(cwd: string, targetFiles: string[]) {
+  const snapshot = new Map<string, string | null>();
+  for (const relPath of targetFiles) {
+    if (!isSafeRelativePath(relPath)) continue;
+    const abs = path.join(cwd, relPath);
+    try {
+      const stat = await fs.stat(abs);
+      if (!stat.isFile()) {
+        snapshot.set(relPath, null);
+        continue;
+      }
+      snapshot.set(relPath, await fs.readFile(abs, "utf8"));
+    } catch {
+      snapshot.set(relPath, null);
+    }
+  }
+  return snapshot;
+}
+
+function changedFilesFromSnapshots(before: Map<string, string | null>, after: Map<string, string | null>) {
+  const keys = new Set<string>([...before.keys(), ...after.keys()]);
+  const changed: string[] = [];
+  for (const key of keys) {
+    if ((before.get(key) ?? null) !== (after.get(key) ?? null)) {
+      changed.push(key);
+    }
+  }
+  return changed;
+}
+
 async function ensurePatchApplies(cwd: string, patch: string) {
   const tmpPath = path.join(os.tmpdir(), `devroom-patch-${Date.now()}-${Math.random().toString(36).slice(2)}.diff`);
   await fs.writeFile(tmpPath, patch, "utf8");
@@ -174,9 +370,10 @@ async function applyFileEdits(cwd: string, fileEdits: Array<{ path: string; cont
   const seen = new Set<string>();
 
   for (const edit of fileEdits) {
-    const relPath = String(edit.path ?? "").trim();
+    const relPath = normalizeRelPath(String(edit.path ?? "").trim());
     const content = typeof edit.content === "string" ? edit.content : "";
     if (!isSafeRelativePath(relPath)) continue;
+    if (!isEditableTargetPath(relPath)) continue;
     if (!allowedPaths.has(relPath)) continue;
     if (seen.has(relPath)) continue;
     seen.add(relPath);
@@ -234,6 +431,7 @@ Rules:
 - Pick up to 8 files.
 - targetFiles may include existing files and up to 4 new files when needed.
 - All targetFiles must be safe relative paths (no ../, no absolute paths).
+- Target files must be source/config/docs text files only (no images, mockups, design assets, or other binary files).
 - Plan should be concrete and execution-focused.`,
       },
       {
@@ -255,7 +453,10 @@ ${params.files.join("\n")}`,
   return {
     plan: Array.isArray(parsed.plan) ? parsed.plan.slice(0, 8).map((s) => String(s)) : [],
     targetFiles: Array.isArray(parsed.targetFiles)
-      ? parsed.targetFiles.map((s) => String(s)).filter(isSafeRelativePath).slice(0, 6)
+      ? parsed.targetFiles
+        .map((s) => normalizeRelPath(String(s).trim()))
+        .filter((s) => isEditableTargetPath(s))
+        .slice(0, TARGET_FILE_LIMIT)
       : [],
   };
 }
@@ -299,7 +500,8 @@ Rules:
 - edit only allowed target files.
 - fileEdits paths must be exact paths from allowed target files.
 - include a patch only when a concrete code change is possible.
-- verificationCommands should be safe local checks (max 3).`,
+- Do not edit design/image/binary files.
+- verificationCommands should be package-script checks only (npm/pnpm/yarn run <script>) and max 3.`,
       },
       {
         role: "user",
@@ -330,15 +532,15 @@ ${filesJoined}`,
 
   const parsed = JSON.parse(response.choices[0].message.content ?? "{}") as PatchPlan;
   return {
-    patch: typeof parsed.patch === "string" ? normalizePatch(parsed.patch) : "",
+    patch: params.preferFileEdits ? "" : (typeof parsed.patch === "string" ? normalizePatch(parsed.patch) : ""),
     fileEdits: Array.isArray(parsed.fileEdits)
       ? parsed.fileEdits
         .map((entry) => ({
-          path: typeof entry?.path === "string" ? entry.path : "",
+          path: typeof entry?.path === "string" ? normalizeRelPath(entry.path.trim()) : "",
           content: typeof entry?.content === "string" ? entry.content : "",
         }))
-        .filter((entry) => isSafeRelativePath(entry.path))
-        .slice(0, 6)
+        .filter((entry) => isEditableTargetPath(entry.path))
+        .slice(0, TARGET_FILE_LIMIT)
       : [],
     verificationCommands: Array.isArray(parsed.verificationCommands)
       ? parsed.verificationCommands.map((c) => String(c)).slice(0, 3)
@@ -351,6 +553,7 @@ async function readTargetFiles(cwd: string, targetFiles: string[]) {
   const payload: Array<{ path: string; content: string }> = [];
   for (const relPath of targetFiles) {
     if (!isSafeRelativePath(relPath)) continue;
+    if (!isEditableTargetPath(relPath)) continue;
     const abs = path.join(cwd, relPath);
     try {
       const stat = await fs.stat(abs);
@@ -358,7 +561,7 @@ async function readTargetFiles(cwd: string, targetFiles: string[]) {
       const content = await fs.readFile(abs, "utf8");
       payload.push({
         path: relPath,
-        content: content.length > 20000 ? content.slice(0, 20000) : content,
+        content: content.length > FILE_CONTENT_PREVIEW_LIMIT ? content.slice(0, FILE_CONTENT_PREVIEW_LIMIT) : content,
       });
     } catch {
       // Ignore unreadable target files
@@ -445,13 +648,24 @@ export async function runWorkerAgenticExecution(params: {
         files: context.files,
       });
 
-      const targetFiles = executionPlan.targetFiles.length > 0
-        ? executionPlan.targetFiles
-        : context.files.slice(0, 3);
+      const targetFiles = selectTargetFiles({
+        requestedTargets: executionPlan.targetFiles,
+        workspaceFiles: context.files,
+        taskTitle: task.title,
+        taskDescription: task.description,
+        acceptanceCriteria: task.acceptanceCriteria,
+      });
       if (targetFiles.length === 0) {
-        targetFiles.push("README.md", "docs/implementation-plan.md");
+        await prisma.task.update({
+          where: { id: task.id },
+          data: { status: "blocked", blockedReason: "Agentic execution could not find safe target files for this task." },
+        });
+        await emitTaskStatus(roomId, task.id, task.title, "blocked", "No safe target files identified.");
+        await workerMessage(`I could not map "${task.title}" to safe code files in this repo yet. Please add more concrete file-level guidance and retry.`);
+        continue;
       }
       const filePayload = await readTargetFiles(cwd, targetFiles);
+      const beforeSnapshot = await snapshotTargetFiles(cwd, targetFiles);
 
       const patchPlan = await makePatchPlan({
         roomTitle: room.title,
@@ -463,6 +677,7 @@ export async function runWorkerAgenticExecution(params: {
         plan: executionPlan.plan,
         allowedTargets: targetFiles,
         filePayload,
+        preferFileEdits: true,
       });
 
       if (!patchPlan.patch.trim() && patchPlan.fileEdits.length === 0) {
@@ -470,7 +685,7 @@ export async function runWorkerAgenticExecution(params: {
         continue;
       }
 
-      const allowedPaths = new Set([...targetFiles, ...filePayload.map((f) => f.path)]);
+      const allowedPaths = new Set(targetFiles);
       let applyMode: "patch" | "file_edits" | null = null;
       let appliedFiles: string[] = [];
       let firstApplyError: unknown = null;
@@ -527,9 +742,31 @@ export async function runWorkerAgenticExecution(params: {
         continue;
       }
 
+      const afterSnapshot = await snapshotTargetFiles(cwd, targetFiles);
+      const changedTargetFiles = changedFilesFromSnapshots(beforeSnapshot, afterSnapshot);
+      if (changedTargetFiles.length === 0) {
+        await prisma.task.update({
+          where: { id: task.id },
+          data: { status: "blocked", blockedReason: "Agentic execution produced no effective code changes." },
+        });
+        await emitTaskStatus(roomId, task.id, task.title, "blocked", "No effective code changes were produced.");
+        await workerMessage(
+          `I attempted "${task.title}" but no effective file delta was produced in safe target files (${targetFiles.join(", ")}). Re-run with more specific implementation instructions.`,
+        );
+        continue;
+      }
+
       const verificationLogs: string[] = [];
       let verificationFailed = false;
-      for (const cmd of patchPlan.verificationCommands) {
+      const verificationCommands = patchPlan.verificationCommands.length > 0
+        ? patchPlan.verificationCommands
+        : await getFallbackVerificationCommands(cwd);
+
+      if (verificationCommands.length === 0) {
+        verificationLogs.push("No runnable verification script found in package.json. Verification skipped.");
+      }
+
+      for (const cmd of verificationCommands) {
         if (!(await canRunVerificationCommand(cwd, cmd))) {
           verificationLogs.push(`$ ${cmd}\nSKIPPED: command is unsafe or script is not defined in package.json.`);
           continue;
@@ -554,17 +791,31 @@ export async function runWorkerAgenticExecution(params: {
         continue;
       }
 
-      await prisma.task.update({
-        where: { id: task.id },
-        data: { status: "review", blockedReason: null },
-      });
-      await emitTaskStatus(roomId, task.id, task.title, "review");
-
       const gitResult = await commitAndMaybePushRoomRepo({
         roomId,
         workspacePath: cwd,
         taskTitle: task.title,
       });
+
+      if (!gitResult.committed) {
+        await prisma.task.update({
+          where: { id: task.id },
+          data: { status: "blocked", blockedReason: "Agentic execution did not produce a commitable code delta." },
+        });
+        await emitTaskStatus(roomId, task.id, task.title, "blocked", "No commitable code changes were produced.");
+        await workerMessage([
+          `I attempted "${task.title}" but there was still no commitable code delta.`,
+          `Changed safe target files: ${changedTargetFiles.join(", ") || "none"}.`,
+          "Task stays blocked until a concrete code change is produced.",
+        ].join("\n"));
+        continue;
+      }
+
+      await prisma.task.update({
+        where: { id: task.id },
+        data: { status: "review", blockedReason: null },
+      });
+      await emitTaskStatus(roomId, task.id, task.title, "review");
 
       if (gitResult.pushError) {
         await emitEvent({
@@ -585,7 +836,7 @@ export async function runWorkerAgenticExecution(params: {
           roomId,
           category: "task_update",
           title: `Agentic code update: ${task.title}`,
-          content: `Worker agent edited code for **${task.title}**.\n\nSummary: ${patchPlan.progressSummary}\n\nVerification:\n${verificationLogs.length > 0 ? verificationLogs.map((l) => `\`\`\`\n${l}\n\`\`\``).join("\n") : "_No verification commands run_"}`,
+          content: `Worker agent edited code for **${task.title}**.\n\nSummary: ${patchPlan.progressSummary}\n\nChanged files: ${changedTargetFiles.join(", ")}\n\nVerification:\n${verificationLogs.length > 0 ? verificationLogs.map((l) => `\`\`\`\n${l}\n\`\`\``).join("\n") : "_No verification commands run_"}`,
           references: { taskIds: [task.id] },
         },
       });
@@ -596,10 +847,9 @@ export async function runWorkerAgenticExecution(params: {
         applyMode === "file_edits" && appliedFiles.length > 0
           ? `Applied direct file edits to: ${appliedFiles.join(", ")}.`
           : "Applied patch successfully.",
+        `Changed files: ${changedTargetFiles.join(", ")}.`,
         patchPlan.progressSummary,
-        gitResult.committed
-          ? `Created commit${gitResult.commitSha ? ` ${gitResult.commitSha}` : ""}.${gitResult.pushed ? " Pushed to remote." : " Not pushed to remote."}`
-          : "No commit created (no detectable file delta).",
+        `Created commit${gitResult.commitSha ? ` ${gitResult.commitSha}` : ""}.${gitResult.pushed ? " Pushed to remote." : " Not pushed to remote."}`,
         verificationLogs.length > 0 ? `Verification:\n${verificationLogs.join("\n\n")}` : "No verification command was executed.",
       ].join("\n\n"));
 
